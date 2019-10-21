@@ -22,6 +22,7 @@
 
    ;;type meta nodes
    :type/name             {:db/unique :db.unique/identity}
+   :type/qualified-name   {:db/unique :db.unique/identity}
    :type/kebab-case-name  {:db/unique :db.unique/identity}
    :type/PascalCaseName   {:db/unique :db.unique/identity}
    :type/camelCaseName    {:db/unique :db.unique/identity}
@@ -34,6 +35,7 @@
 
    ;;field meta nodes
    :field/name            {:db/index true}
+   :field/qualified-name  {:db/index true}
    :field/kebab-case-name {:db/index true}
    :field/PascalCaseName  {:db/index true}
    :field/camelCaseName   {:db/index true}
@@ -47,6 +49,7 @@
 
    ;;param meta nodes
    :param/name            {:db/index true}
+   :param/qualified-name  {:db/index true}
    :param/kebab-case-name {:db/index true}
    :param/PascalCaseName  {:db/index true}
    :param/camelCaseName   {:db/index true}
@@ -126,14 +129,11 @@
 #?(:clj
    (defn ^:private schema-streams
      [paths]
-     (reduce
-      (fn [a path]
-        (concat a (slurpable-streams path)))
-      [] paths)))
+     (mapv slurpable-streams paths)))
 
 #?(:clj
    (defn ^:private slurp-files
-     [files] 
+     [files]
      (map #(-> % slurp edn/read-string)
           files)))
 
@@ -228,15 +228,15 @@
        (cond-> m
          (or only except)
          (dissoc tag-k)
-         
-         (= true v)
-         (assoc tag-k true)
+
+         v
+         (assoc tag-k v)
 
          (and only (some #(= sym %) only))
-         (assoc tag-k true)
+         (assoc tag-k v)
 
          (and except (not (some #(= sym %) except)))
-         (assoc tag-k true))))
+         (assoc tag-k v))))
    (or base {}) rec))
 
 (defn ^:private conj-type
@@ -311,7 +311,7 @@
               (let [recursive (merge recursive (get-recursive last-field))]
                 (conj-params accum t last-field last-r field
                              default recursive))
-              
+
               :default
               accum)]
         (recur new-accum
@@ -341,29 +341,23 @@
 
 (defn ^:private parse-type-groups
   [accum type-groups]
-  (reduce (fn [a type-group]
-            (parse-types a type-group))
-          accum
-          type-groups))
+  (reduce parse-types accum type-groups))
 
-(defn ^:private create-primitive-types
-  [accum]
-  (reduce (fn [a i]
-            (conj a {:db/id (get-temp-id! i)
-                     :node/type :type
-                     :type/name (str i)
-                     :type/kebab-case-name (->kebab-case-keyword i)
-                     :type/camelCaseName (->camelCaseKeyword i)
-                     :type/PascalCaseName (->PascalCaseKeyword i)
-                     :type/snake_case_name (->snake_case_keyword i)
-                     :type/nature :primitive}))
-          accum '[String Float Integer Boolean DateTime ID]))
+(def ^:private primitive-types
+  (mapv (fn [i]
+          {:db/id (get-temp-id! i)
+           :node/type :type
+           :type/name (str i)
+           :type/kebab-case-name (->kebab-case-keyword i)
+           :type/camelCaseName (->camelCaseKeyword i)
+           :type/PascalCaseName (->PascalCaseKeyword i)
+           :type/snake_case_name (->snake_case_keyword i)
+           :type/nature :primitive})
+        '[String Float Integer Boolean DateTime ID]))
 
 (defn ^:private internal-schema
   [source-schemas]
-  (-> []
-      create-primitive-types
-      (parse-type-groups source-schemas)))
+  (parse-type-groups primitive-types source-schemas))
 
 ;;TODO
 (defn ^:private is-schema-valid?
@@ -382,6 +376,89 @@
   #_(clojure.pprint/pprint schema)
   (d/transact! conn schema)
   conn)
+
+(defn name-str [& xs]
+  (->> (map #(if (ident? %) (name %) (str %)) xs)
+       (apply str)))
+
+(defn join-ns [namespacee namee]
+  (assert (every? (complement #{""}) (map str [namespacee namee])))
+  (keyword (name-str namespacee) (name-str namee)))
+
+(defn ^:private default-prefix []
+  (str (ns-name *ns*)))
+
+(def primitive-names
+  (set (map :type/kebab-case-name primitive-types)))
+
+(defn primitive? [t]
+  (and (contains? primitive-names (:type/kebab-case-name t))
+       (= :type (:node/type t))))
+
+(defn ^:private qualified-names-tx [db]
+  (let [entities (d/q '[:find [(pull ?e [:db/id
+                                         :ns-prefix/tag
+                                         :node/type
+                                         :type/kebab-case-name
+                                         :param/kebab-case-name
+                                         :field/kebab-case-name
+                                         {:field/parent [:type/kebab-case-name]}
+                                         {:param/parent [:field/kebab-case-name
+                                                         {:field/parent
+                                                          [:type/kebab-case-name]}]}])
+                               ...]
+                        :where [?e :node/type]]
+                      db)]
+
+    (->> entities
+         (remove primitive?)
+         (mapv (fn [{prefix :ns-prefix/tag
+                     field-name :field/kebab-case-name
+                     type-name :type/kebab-case-name
+                     param-name :param/kebab-case-name
+                     {field-parent-name :type/kebab-case-name} :field/parent
+                     {{param-gparent-name :type/kebab-case-name} :field/parent
+                      param-parent-name :field/kebab-case-name} :param/parent
+                     db-id :db/id
+                     :as x
+                     :or {prefix (default-prefix)}}]
+                 (let [ent {:db/id db-id
+                            :ns-prefix/tag prefix}]
+                   (cond
+                     field-name
+                     (assoc ent :field/qualified-name
+                            (join-ns (name-str prefix "." field-parent-name)
+                                     field-name))
+
+
+                     param-name
+                     (assoc ent :param/qualified-name
+                            (join-ns (name-str  prefix "."
+                                                param-gparent-name "."
+                                                param-parent-name)
+                                     param-name))
+
+                     type-name
+                     (assoc ent :type/qualified-name (join-ns prefix type-name)))))))))
+
+(comment
+
+  (let [meta-db
+        (init-schema
+         '[^{:ns-prefix/tag-recursive :foo}
+           myType
+           [my-id name nested [param]]])
+
+        tx (->> (qualified-names-tx @meta-db)
+                (map #(dissoc % :db/id :ns-prefix/tag)))]
+    (= (set tx)
+       #{{:field/qualified-name :foo.my-type/name}
+         {:param/qualified-name :foo.my-type.nested/param}
+         {:field/qualified-name :foo.my-type/nested}
+         {:field/qualified-name :foo.my-type/my-id}
+         {:type/qualified-name :foo/my-type}}))
+
+  )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Public functions
