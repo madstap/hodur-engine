@@ -419,27 +419,32 @@
                      {field-parent-name :type/kebab-case-name} :field/parent
                      {{param-gparent-name :type/kebab-case-name} :field/parent
                       param-parent-name :field/kebab-case-name} :param/parent
-                     db-id :db/id
-                     :as x
-                     :or {prefix (default-prefix)}}]
-                 (let [ent {:db/id db-id
+                     db-id :db/id}]
+                 (let [prefix (if (true? prefix) (default-prefix) prefix)
+                       ent {:db/id db-id
                             :ns-prefix/tag prefix}]
                    (cond
                      field-name
                      (assoc ent :field/qualified-name
-                            (join-ns (name-str prefix "." field-parent-name)
+                            (join-ns (name-str (when prefix
+                                                 (name-str prefix "."))
+                                               field-parent-name)
                                      field-name))
 
 
                      param-name
                      (assoc ent :param/qualified-name
-                            (join-ns (name-str  prefix "."
+                            (join-ns (name-str  (when prefix
+                                                  (name-str prefix "."))
                                                 param-gparent-name "."
                                                 param-parent-name)
                                      param-name))
 
                      type-name
-                     (assoc ent :type/qualified-name (join-ns prefix type-name)))))))))
+                     (assoc ent :type/qualified-name
+                            (if prefix
+                              (join-ns prefix type-name)
+                              type-name)))))))))
 
 (comment
 
@@ -457,6 +462,21 @@
          {:field/qualified-name :foo.my-type/nested}
          {:field/qualified-name :foo.my-type/my-id}
          {:type/qualified-name :foo/my-type}}))
+
+  (let [meta-db
+        (init-schema
+         '[myType
+           [my-id name nested [param]]])
+
+        tx (->> (qualified-names-tx @meta-db)
+                (map #(dissoc % :db/id :ns-prefix/tag)))]
+
+    (= (set tx)
+       #{#:param{:qualified-name :my-type.nested/param}
+         #:field{:qualified-name :my-type/nested}
+         #:field{:qualified-name :my-type/name}
+         #:type{:qualified-name :my-type}
+         #:field{:qualified-name :my-type/my-id}}))
 
   )
 
