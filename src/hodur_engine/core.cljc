@@ -496,7 +496,8 @@
   (let [source-schemas (conj others source-schema)
         schema (internal-schema source-schemas)]
     (if (is-schema-valid? schema)
-      (ensure-meta-db schema))))
+      (let [conn (ensure-meta-db schema)]
+        (extend-meta-db conn (qualified-names-tx @conn))))))
 
 #?(:clj
    (defn init-path [path & others]
